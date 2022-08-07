@@ -36,7 +36,7 @@ abstract class ReadProvider {
   /// Gets the details and status of a submitted transaction from hash of a transaction.
   ///
   /// [Spec](https://github.com/starkware-libs/starknet-specs/blob/30e5bafcda60c31b5fb4021b4f5ddcfc18d2ff7d/api/starknet_api_openrpc.json#L150-L175)
-  Future<GetTransaction> getTransactionByHash(Felt txnHash);
+  Future<GetTransaction> getTransactionByHash(Felt transactionHash);
 
   /// Gets the details and status of a submitted transaction from block id and index.
   ///
@@ -49,7 +49,7 @@ abstract class ReadProvider {
   /// Gets the details and status of a submitted transaction from hash of a transaction.
   ///
   /// [Spec](https://github.com/starkware-libs/starknet-specs/blob/30e5bafcda60c31b5fb4021b4f5ddcfc18d2ff7d/api/starknet_api_openrpc.json#L214-L239)
-  Future<GetTransactionReceipt> getTransactionReceipt(Felt txnHash);
+  Future<GetTransactionReceipt> getTransactionReceipt(Felt transactionHash);
 
   /// Gets the currently configured StarkNet chain id.
   ///
@@ -99,6 +99,14 @@ abstract class ReadProvider {
   Future<GetClass> getClassAt({
     required Felt contractAddress,
     required BlockId blockId,
+  });
+
+  /// Function to wait for a contract to be deployed or a transaction to be accepted on L2.
+  ///
+  /// [Spec]()
+  Future<void> waitForTransaction({
+    required Felt transactionHash,
+    int retryInterval = 8000,
   });
 }
 
@@ -261,6 +269,60 @@ class JsonRpcReadProvider implements ReadProvider {
       method: 'starknet_getClassAt',
       params: [blockId, contractAddress],
     ).then(GetClass.fromJson);
+  }
+
+  @override
+  Future<void> waitForTransaction({
+    required Felt transactionHash,
+    int retryInterval = 8000,
+  }) async {
+    bool onChain = false;
+    int retries = 100;
+
+    while (!onChain) {
+      const successStates = ['ACCEPTED_ON_L1', 'ACCEPTED_ON_L2', 'PENDING'];
+      const errorStates = ['REJECTED', 'NOT_RECEIVED'];
+
+      await Future.delayed(Duration(milliseconds: retryInterval));
+      try {
+        GetTransactionReceipt receipt =
+            await getTransactionReceipt(transactionHash);
+
+        receipt.when(
+          result: (receipt) {
+            String? status = receipt.mapOrNull<String?>(
+                invokeTxnReceipt: (invokeTransactionReceipt) =>
+                    invokeTransactionReceipt.status,
+                declareTxnReceipt: (declareTransactionReceipt) =>
+                    declareTransactionReceipt.status,
+                deployTxnReceipt: (deployTransactionReceipt) =>
+                    deployTransactionReceipt.status);
+
+            if (status != null) {
+              if (successStates.contains(status)) {
+                onChain = true;
+              } else if (errorStates.contains(status)) {
+                JsonRpcApiError error =
+                    JsonRpcApiError(code: -1, message: status);
+                throw error;
+              }
+            }
+          },
+          error: (error) {
+            throw error;
+          },
+        );
+      } catch (error) {
+        if (error is JsonRpcApiError && error.code == -1) {
+          rethrow;
+        }
+
+        if (retries == 0) {
+          rethrow;
+        }
+      }
+      retries -= 1;
+    }
   }
 
   static final devnet = JsonRpcReadProvider(nodeUri: devnetUri);
